@@ -1,96 +1,199 @@
-"use client";
 import React, { useState } from "react";
-import { useTurnkeySignerAdapter } from "../../services/trunkyClient";
-import { createUnsignedTransferAndPreSign, signAttachAndBroadcast } from "../../services/stacksService";
-import { STACKS_TESTNET } from "@stacks/network";
+import { useSendSTXTransaction, getBalance } from "../../services/stacksService";
 
-interface SendTransactionProps {
-    senderAddress: string;
+interface Account {
+    accountId: string;
+    publicKey: string;
+    address: string;
 }
 
-export default function SendTransaction({ senderAddress }: SendTransactionProps) {
-    const turnkeySigner = useTurnkeySignerAdapter();
+interface SendTransactionProps {
+    account: Account;
+}
+
+export default function SendTransaction({ account }: SendTransactionProps) {
+    const { sendSTXTransaction } = useSendSTXTransaction();
+
     const [recipient, setRecipient] = useState("");
-    const [amount, setAmount] = useState<number>(0);
-    const [fee, setFee] = useState<number>(5000);
-    const [nonce, setNonce] = useState<number | undefined>(undefined);
-    const [status, setStatus] = useState<string>("");
-    const network = STACKS_TESTNET;
+    const [amount, setAmount] = useState("");
+    const [fee, setFee] = useState("1000");
+    const [memo, setMemo] = useState("");
+    const [status, setStatus] = useState("");
+    const [txId, setTxId] = useState("");
+    const [loading, setLoading] = useState(false);
+    const [balance, setBalance] = useState<string | null>(null);
 
-    async function handleSend() {
-        setStatus("Preparing unsigned tx...");
+    const handleSend = async () => {
+        if (!recipient || !amount) {
+            setStatus("Please fill in all required fields");
+            return;
+        }
+
+        setLoading(true);
+        setStatus("Preparing transaction...");
+        setTxId("");
+
         try {
-            if (!senderAddress) throw new Error("No sender address provided.");
+            const nonce = 0;
+            const amountInMicroStx = Math.floor(parseFloat(amount) * 1_000_000);
+            const feeInMicroStx = parseInt(fee);
 
-            const n = nonce ?? 0;
+            setStatus("Signing transaction with Turnkey...");
 
-            const { tx: unsignedTx, preSignHash } = await createUnsignedTransferAndPreSign(
-                senderAddress,
+            const result = await sendSTXTransaction(
+                account.publicKey,
                 recipient,
-                amount,
-                fee,
-                n,
+                amountInMicroStx,
+                feeInMicroStx,
+                nonce,
+                memo,
                 "testnet"
             );
 
-            setStatus("Computing preSign hash and asking Turnkey to sign...");
-            const res = await signAttachAndBroadcast(unsignedTx, preSignHash, turnkeySigner, network);
-            setStatus("Broadcast result: " + JSON.stringify(res));
-        } catch (err: any) {
-            setStatus("Error: " + err?.message);
-            console.error(err);
+            // setTxId(result.txid);
+            setStatus("Transaction broadcast successfully!");
+            setRecipient("");
+            setAmount("");
+            setMemo("");
+        } catch (error: any) {
+            console.error("Transaction error:", error);
+            setStatus(`Error: ${error.message || "Transaction failed"}`);
+        } finally {
+            setLoading(false);
         }
-    }
+    };
+
+    const handleCheckBalance = async () => {
+        setStatus("Fetching balance...");
+        try {
+            const { stx: balanceData } = await getBalance(account.address);
+            setBalance(balanceData.toString());
+            setStatus("");
+        } catch (error: any) {
+            console.error("Balance error:", error);
+            setStatus(`Error fetching balance: ${error.message}`);
+        }
+    };
 
     return (
-        <div className="mt-8 p-4 border rounded-md bg-white shadow-sm">
-            <h3 className="font-semibold mb-4">Send STX Transaction</h3>
-            <div className="mb-2">
-                <label className="block text-sm font-medium text-gray-600 mb-1">Sender</label>
-                <input
-                    readOnly
-                    value={senderAddress || ""}
-                    className="w-full px-3 py-2 border rounded-md bg-gray-100 text-gray-800"
-                />
+        <div className="mt-8 p-6 bg-white rounded-lg shadow-md">
+            <h3 className="text-xl font-bold mb-4">Send STX Transaction</h3>
+
+            <div className="mb-3">
+                <p className="text-sm text-gray-700">
+                    <strong>From:</strong> {account.address}
+                </p>
+                <button
+                    onClick={handleCheckBalance}
+                    className="text-sm text-blue-600 hover:text-blue-700 mt-1"
+                >
+                    Check Balance
+                </button>
+                {balance && (
+                    <p className="text-sm text-gray-600 mt-1">
+                        Balance: {balance} STX
+                    </p>
+                )}
             </div>
-            <div className="mb-2">
-                <label className="block text-sm font-medium text-gray-600 mb-1">Recipient (STX address)</label>
+
+            {/* Recipient */}
+            <div className="mb-4">
+                <label className="block text-sm font-medium mb-2">
+                    Recipient Address *
+                </label>
                 <input
-                    placeholder="STX address"
-                    onChange={(e) => setRecipient(e.target.value)}
+                    type="text"
                     value={recipient}
-                    className="w-full px-3 py-2 border rounded-md"
+                    onChange={(e) => setRecipient(e.target.value)}
+                    placeholder="SP..."
+                    className="w-full p-2 border border-gray-300 rounded-md"
                 />
             </div>
-            <div className="flex space-x-2 mb-2">
-                <div className="flex-1">
-                    <label className="block text-sm font-medium text-gray-600 mb-1">Amount (STX)</label>
-                    <input
-                        type="number"
-                        placeholder="Amount"
-                        onChange={(e) => setAmount(Number(e.target.value))}
-                        value={amount}
-                        className="w-full px-3 py-2 border rounded-md"
-                    />
-                </div>
-                <div className="flex-1">
-                    <label className="block text-sm font-medium text-gray-600 mb-1">Fee (microSTX)</label>
-                    <input
-                        type="number"
-                        placeholder="Fee"
-                        onChange={(e) => setFee(Number(e.target.value))}
-                        value={fee}
-                        className="w-full px-3 py-2 border rounded-md"
-                    />
-                </div>
+
+            {/* Amount */}
+            <div className="mb-4">
+                <label className="block text-sm font-medium mb-2">
+                    Amount (STX) *
+                </label>
+                <input
+                    type="number"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder="0.1"
+                    step="0.000001"
+                    min="0"
+                    className="w-full p-2 border border-gray-300 rounded-md"
+                />
             </div>
+
+            {/* Fee */}
+            <div className="mb-4">
+                <label className="block text-sm font-medium mb-2">
+                    Fee (microSTX)
+                </label>
+                <input
+                    type="number"
+                    value={fee}
+                    onChange={(e) => setFee(e.target.value)}
+                    placeholder="1000"
+                    min="0"
+                    className="w-full p-2 border border-gray-300 rounded-md"
+                />
+            </div>
+
+            {/* Memo */}
+            <div className="mb-4">
+                <label className="block text-sm font-medium mb-2">Memo</label>
+                <input
+                    type="text"
+                    value={memo}
+                    onChange={(e) => setMemo(e.target.value)}
+                    placeholder="Optional memo"
+                    className="w-full p-2 border border-gray-300 rounded-md"
+                />
+            </div>
+
+            {/* Send Button */}
             <button
                 onClick={handleSend}
-                className="w-full bg-emerald-600 text-white py-2 rounded-md hover:bg-emerald-700 transition"
+                disabled={loading}
+                className={`w-full py-3 rounded-md font-semibold transition ${loading
+                        ? "bg-gray-300 cursor-not-allowed"
+                        : "bg-blue-600 hover:bg-blue-700 text-white"
+                    }`}
             >
-                Send Transaction
+                {loading ? "Processing..." : "Send Transaction"}
             </button>
-            {status && <div className="mt-3 text-sm text-gray-700">{status}</div>}
+
+            {status && (
+                <div
+                    className={`mt-4 p-3 rounded-md ${status.includes("Error")
+                            ? "bg-red-100 text-red-700"
+                            : status.includes("success")
+                                ? "bg-green-100 text-green-700"
+                                : "bg-blue-100 text-blue-700"
+                        }`}
+                >
+                    {status}
+                </div>
+            )}
+
+            {txId && (
+                <div className="mt-4 p-3 bg-green-50 rounded-md">
+                    <p className="font-semibold text-green-800 mb-2">
+                        Transaction Submitted!
+                    </p>
+                    <p className="text-sm text-gray-700 break-all">TX ID: {txId}</p>
+                    <a
+                        href={`https://explorer.hiro.so/txid/${txId}?chain=testnet`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm text-blue-600 hover:text-blue-700 underline"
+                    >
+                        View on Explorer
+                    </a>
+                </div>
+            )}
         </div>
     );
 }

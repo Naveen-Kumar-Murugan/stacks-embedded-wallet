@@ -6,12 +6,20 @@ import {
     SingleSigSpendingCondition,
     sigHashPreSign,
     TransactionSigner,
+    broadcastTransaction,
     type StacksTransactionWire,
 } from "@stacks/transactions";
 import { bytesToHex, hexToBytes } from "@stacks/common";
+import { Turnkey } from "@turnkey/sdk-server";
 
-export type SignerCallback = (preSignHash: Uint8Array | string) => Promise<{ v: number; r: string; s: string } | { compactHex: string }>;
+export type SignerCallback = (preSignHash: Uint8Array | string, acc: any) => Promise<{ v: number; r: string; s: string } | { compactHex: string }>;
 
+const turnkeyClient = new Turnkey({
+    apiBaseUrl: process.env.TURNKEY_API_BASE_URL!,
+    apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY!,
+    apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY!,
+    defaultOrganizationId: process.env.TURNKEY_ORGANIZATION_ID!,
+});
 
 export async function buildUnsignedSTXTransfer(opts: {
     sender: string;
@@ -22,7 +30,6 @@ export async function buildUnsignedSTXTransfer(opts: {
     network?: "testnet";
     memo?: string;
 }) {
-
     const unsignedOpts: UnsignedTokenTransferOptions = {
         publicKey: opts.sender,
         recipient: opts.recipient,
@@ -33,6 +40,7 @@ export async function buildUnsignedSTXTransfer(opts: {
         memo: opts.memo || "",
         network: "testnet",
     } as any;
+
     console.log("Inside buildUnsignedSTXTransfer and unsignedOpts: ", unsignedOpts);
     const unsignedTx = await makeUnsignedSTXTokenTransfer(unsignedOpts);
     console.log("Inside buildUnsignedSTXTransfer and unsignedTx: ", unsignedTx);
@@ -52,78 +60,71 @@ export function computePreSignHash(
     );
 
     return preSignSigHash;
-};
+}
 
+export function attachSignatureToUnsignedTx(
+    unsignedTx: any,
+    signerSig: { v: number; r: string; s: string } | { compactHex: string }
+) {
+    let compactSigHex: string;
 
-export function attachSignatureToUnsignedTx(unsignedTx: any, signerSig: { v: number; r: string; s: string } | { compactHex: string }) {
-    let vrsBytes: Uint8Array;
     if ("compactHex" in signerSig) {
-        vrsBytes = hexToBytes(signerSig.compactHex);
+        compactSigHex = signerSig.compactHex.replace(/^0x/, "");
     } else {
-        const r = signerSig.r.startsWith("0x") ? signerSig.r.slice(2) : signerSig.r;
-        const s = signerSig.s.startsWith("0x") ? signerSig.s.slice(2) : signerSig.s;
-        const v = Number(signerSig.v);
-        const compactHex = r + s + v.toString(16).padStart(2, "0");
-        vrsBytes = hexToBytes(compactHex);
+        // Normalize r, s, and v to correct format
+        const rClean = signerSig.r.replace(/^0x/, "").padStart(64, "0");
+        const sClean = signerSig.s.replace(/^0x/, "").padStart(64, "0");
+        const vByte = signerSig.v.toString(16).padStart(2, "0"); // recovery byte
+
+        // 🧩 correct order: v + r + s
+        compactSigHex = `${vByte}${rClean}${sClean}`;
+        console.log("Attaching signature:", {
+            v: signerSig.v,
+            r: signerSig.r,
+            s: signerSig.s,
+            compactSigHex,
+        });
     }
 
     try {
-        const spendingCondition = unsignedTx.auth.spendingCondition as SingleSigSpendingCondition;
-        spendingCondition.signature = createMessageSignature(bytesToHex(vrsBytes));
+        const spendingCondition =
+            unsignedTx.auth.spendingCondition as SingleSigSpendingCondition;
 
+        spendingCondition.signature = createMessageSignature(compactSigHex);
         return unsignedTx;
     } catch (err) {
-        console.error("Signing failed:", err);
+        console.error("Failed to attach signature:", err);
         return undefined;
     }
-    // Different transaction types and SDK versions require slightly different API calls.
-    // We'll attempt the most common approach: use TransactionSigner to set origin signature.
-    //   try {
-    //     const signer = new TransactionSigner(deserialized as any);
-    //     // There isn't a direct 'set signature bytes' helper exposed in older SDKs.
-    //     // If `signer.signOriginWithSignature` or similar exists in your SDK please use it.
-    //     // We'll attempt to use `signer.addSignature` pattern — if missing, user should
-    //     // replace this with the library-specific call.
-    //     if (typeof (signer as any).signOriginWithSignature === "function") {
-    //       // hypothetical helper used by some stacks.js versions
-    //       (signer as any).signOriginWithSignature(vrsBytes);
-    //     } else if (typeof (deserialized as any).setSignature === "function") {
-    //       // another possible internal helper
-    //       (deserialized as any).setSignature(vrsBytes);
-    //     } else {
-    //       // last resort: attempt direct manipulation of spendingCondition
-    //       // WARNING: this touches internal SDK structure and might need adjustment
-    //       const auth = (deserialized as any).auth;
-    //       if (!auth) throw new Error("transaction auth structure not found");
-    //       // originCondition
-    //       const origin = auth.spendingCondition || auth.spendingConditionOrigin || auth.principal;
-    //       if (!origin) throw new Error("spendingCondition not found for attaching signature");
-    //       origin.signature = vrsBytes;
-    //     }
-    //   } catch (err) {
-    //     // If attaching fails, throw a clear error so the developer can map the correct SDK call
-    //     throw new Error(
-    //       "attaching signature failed — SDK versions differ. See README and stacks.js docs. Inner: " + (err as Error).message
-    //     );
-    //   }
-
-    // Serialize signed tx and return hex
-    //   const signedSerialized = deserialized.serialize();
-    //   return signedSerialized;
 }
 
-export async function broadcastSignedTxHex(signedTxHex: string, networkName: "testnet" | "mainnet" = "testnet", hiroApiUrl?: string) {
-    const endpoint = hiroApiUrl || (networkName === "testnet" ? "https://stacks-node-api.testnet.stacks.co" : "https://stacks-node-api.mainnet.stacks.co");
-    const url = `${endpoint}/v2/transactions`;
-    const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: Buffer.from(signedTxHex, "hex"),
-    });
-    if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(`Broadcast failed: ${res.status} ${txt}`);
+
+export async function broadcastSignedTransaction(
+    signedTx: StacksTransactionWire,
+    network: "testnet" | "mainnet" = "testnet"
+) {
+    try {
+        const result = await broadcastTransaction({
+            transaction: signedTx,
+            network: "testnet"
+        });
+
+        if ('error' in result) {
+            console.error("Broadcast error details:", result);
+
+            const reason = (result as any).reason;
+            const reasonData = (result as any).reason_data;
+
+            throw new Error(
+                `${result.error} - ${reason || ""} ${reasonData ? JSON.stringify(reasonData) : ""
+                }`
+            );
+        }
+
+        console.log("Broadcast success:", result);
+        return result;
+    } catch (err) {
+        console.error("Broadcast failed:", err);
+        throw err;
     }
-    const body = await res.json();
-    return body;
 }
